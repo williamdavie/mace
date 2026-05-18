@@ -13,7 +13,6 @@ from mace.tools.scripts_utils import extract_config_mace_model
 
 try:
     import cuequivariance as cue
-
     CUEQQ_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
     CUEQQ_AVAILABLE = False
@@ -61,8 +60,42 @@ def get_kmax_pairs(
             kmax_pairs = kmax_pairs + [[num_layers - 1, num_product_irreps]]
         else:
             kmax_pairs = kmax_pairs + [[num_layers - 1, 0]]
-        return kmax_pairs
+            return kmax_pairs
     raise NotImplementedError(f"Correlation {correlation} not supported")
+
+
+def get_transfer_keys(num_layers: int) -> List[str]:
+    """Get list of keys that need to be transferred"""
+    return [
+        "node_embedding.linear.weight",
+        "radial_embedding.bessel_fn.bessel_weights",
+        "atomic_energies_fn.atomic_energies",
+        "readouts.0.linear.weight",
+        *[f"readouts.{j}.linear.weight" for j in range(num_layers - 1)],
+        "scale_shift.scale",
+        "scale_shift.shift",
+        *[f"readouts.{num_layers-1}.linear_{i}.weight" for i in range(1, 3)],
+    ] + [
+        s
+        for j in range(num_layers)
+        for s in [
+            f"interactions.{j}.linear_up.weight",
+            *[f"interactions.{j}.conv_tp_weights.layer{i}.weight" for i in range(4)],
+            f"interactions.{j}.linear.weight",
+            f"interactions.{j}.skip_tp.weight",
+            f"products.{j}.linear.weight",
+            f"magmom_products.{j}.linear.weight",
+        ]
+    ] + [
+        s
+        for j in range(num_layers)
+            for s in [
+                f"interactions.{j}.magmom_linear.weight",
+                f"interactions.{j}.magmom_skip_tp.weight",
+                f"products.{j}.linear_ori.weight",
+                f"magmom_products.{j}.linear_ori.weight",
+            ]
+    ]
 
 
 def transfer_symmetric_contractions(
@@ -72,14 +105,10 @@ def transfer_symmetric_contractions(
     products: torch.nn.Module,
     correlation: int,
     num_layers: int,
-    use_reduced_cg: bool,
-    keep_last_layer_irreps: bool,
 ):
     """Transfer symmetric contraction weights"""
-    kmax_pairs = get_kmax_pairs(
-        num_product_irreps, correlation, num_layers, keep_last_layer_irreps
-    )
-    suffixes = ["_max"] + [f".{i}" for i in range(correlation - 1)]
+    kmax_pairs = get_kmax_pairs(max_L, correlation, num_layers)
+
     for i, kmax in kmax_pairs:
         irreps_in = o3.Irreps(
             irrep.ir for irrep in products[i].symmetric_contractions.irreps_in
@@ -152,10 +181,33 @@ def transfer_weights(
     )
 
     transferred_keys = set()
+    # Transfer main weights
+    transfer_keys = get_transfer_keys(num_layers)
+    for key in transfer_keys:
+        if key in source_dict:  # Check if key exists
+            target_dict[key] = source_dict[key]
+        else:
+            logging.warning(f"Key {key} not found in source model")
+
+    # Transfer symmetric contractions
+    transfer_symmetric_contractions(source_dict, target_dict, max_L, correlation, num_layers)
+
+    # Unsqueeze linear and skip_tp layers
+    for key in source_dict.keys():
+        if any(x in key for x in ["linear", "skip_tp"]) and "weight" in key:
+            target_dict[key] = target_dict[key].unsqueeze(0)
+
+
+    transferred_keys = set(transfer_keys)
     remaining_keys = (
         set(source_dict.keys()) & set(target_dict.keys()) - transferred_keys
     )
     remaining_keys = {k for k in remaining_keys if "symmetric_contraction" not in k}
+
+    for key in remaining_keys:
+        if key == "magmom_products.0.conv_tp.weight" or key == "products.0.conv_tp.weight":
+            target_dict[key] = target_dict[key]# .unsqueeze(0)
+
     if remaining_keys:
         for key in remaining_keys:
             src = source_dict[key]
@@ -210,6 +262,7 @@ def run(
     correlation = config["correlation"]
     use_reduced_cg = config.get("use_reduced_cg", True)
     keep_last_layer_irreps = config.get("keep_last_layer_irreps", False)
+    num_layers = config["num_interactions"]
 
     # Add cuequivariance config
     config["cueq_config"] = CuEquivarianceConfig(
@@ -220,6 +273,12 @@ def run(
         conv_fusion=(device == "cuda"),
     )
 
+    # remove magnetic model configuration if the model is not 
+    # for magnetism
+    if "Magnetic" not in str(source_model.__class__):
+        config.pop("m_max", None)
+        config.pop("max_m_ell", None)
+        config.pop("num_mag_radial_basis", None)
     # Create new model with cuequivariance config
     logging.info("Creating new model with cuequivariance settings")
     target_model = source_model.__class__(**config).to(device)

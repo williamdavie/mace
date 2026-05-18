@@ -107,6 +107,7 @@ class MACECalculator(Calculator):
         charges_key="Qs",
         info_keys=None,
         arrays_keys=None,
+        magmom_key="dft_magmom",
         model_type="MACE",
         compile_mode=None,
         fullgraph=True,
@@ -273,6 +274,7 @@ class MACECalculator(Calculator):
                 getattr(self.models[0], "atomic_multipoles_max_l", 0) + 1
             ) ** 2
 
+        self.magmom_key = magmom_key
         try:
             self.available_heads: List[str] = self.models[0].heads  # type: ignore
         except AttributeError:
@@ -525,10 +527,9 @@ class MACECalculator(Calculator):
         )
 
     def _atoms_to_batch(self, atoms):
-        self.arrays_keys.update({self.charges_key: "charges"})
+        self.arrays_keys.update({self.charges_key: "charges", self.magmom_key : "dft_magmom"})
         keyspec = mace_data.KeySpecification(
-            info_keys=self.info_keys, arrays_keys=self.arrays_keys
-        )
+            info_keys=self.info_keys, arrays_keys=self.arrays_keys)
         with torch_tools.default_dtype(self.default_dtype):
             config = mace_data.config_from_atoms(
                 atoms, key_specification=keyspec, head_name=self.head
@@ -612,6 +613,11 @@ class MACECalculator(Calculator):
 
         ret_tensors = None
         node_e0 = None
+
+        ret_tensors = self._create_result_tensors(
+            self.model_type, self.num_models, len(atoms)
+        )
+
         for i, model in enumerate(self.models):
             batch = self._clone_batch(batch_base)
             model_dtype = next(model.parameters()).dtype
@@ -834,3 +840,690 @@ class MACECalculator(Calculator):
         if self.num_models == 1:
             return descriptors[0]
         return descriptors
+
+
+class MagneticMACECalculator(Calculator):
+    """MACE ASE Calculator
+    args:
+        model_paths: str, path to model or models if a committee is produced
+                to make a committee use a wild card notation like mace_*.model
+        device: str, device to run on (cuda or cpu)
+        energy_units_to_eV: float, conversion factor from model energy units to eV
+        length_units_to_A: float, conversion factor from model length units to Angstroms
+        default_dtype: str, default dtype of model
+        charges_key: str, Array field of atoms object where atomic charges are stored
+        model_type: str, type of model to load
+                    Options: [MACE, DipoleMACE, EnergyDipoleMACE]
+
+    Dipoles are returned in units of Debye
+    """
+
+    def __init__(
+        self,
+        model_paths: Union[list, str, None] = None,
+        models: Union[List[torch.nn.Module], torch.nn.Module, None] = None,
+        device: str = "cpu",
+        energy_units_to_eV: float = 1.0,
+        length_units_to_A: float = 1.0,
+        default_dtype="",
+        charges_key="Qs",
+        info_keys=None,
+        arrays_keys=None,
+        magmom_key="dft_magmom",
+        model_type="MACE",
+        compile_mode=None,
+        fullgraph=True,
+        enable_cueq=False,
+        enable_oeq=False,
+        pad_num_atoms: int = 0,
+        pad_num_edges: int = 0,
+        warmup: bool = False,
+        **kwargs,
+    ):
+        Calculator.__init__(self, **kwargs)
+        if enable_cueq:
+            assert model_type == "MACE", "CuEq only supports MACE models"
+            compile_mode = None
+        if "model_path" in kwargs:
+            deprecation_message = (
+                "'model_path' argument is deprecated, please use 'model_paths'"
+            )
+            if model_paths is None:
+                logging.warning(f"{deprecation_message} in the future.")
+                model_paths = kwargs["model_path"]
+            else:
+                raise ValueError(
+                    f"both 'model_path' and 'model_paths' given, {deprecation_message} only."
+                )
+
+        if (model_paths is None) == (models is None):
+            raise ValueError(
+                "Exactly one of 'model_paths' or 'models' must be provided"
+            )
+
+        self.results = {}
+        if info_keys is None:
+            info_keys = {
+                "total_spin": "spin",
+                "total_charge": "charge",
+                "external_field": "external_field",
+            }
+        if arrays_keys is None:
+            arrays_keys = {}
+        self.info_keys = info_keys
+        self.arrays_keys = arrays_keys
+
+        self.model_type = model_type
+        self.compute_atomic_stresses = False
+
+
+        self.model_type = model_type
+
+        if model_type == "MACE":
+            self.implemented_properties = [
+                "energy",
+                "free_energy",
+                "node_energy",
+                "forces",
+                "stress",
+            ]
+        elif model_type == "DipoleMACE":
+            self.implemented_properties = ["dipole"]
+        elif model_type == "EnergyDipoleMACE":
+            self.implemented_properties = [
+                "energy",
+                "free_energy",
+                "node_energy",
+                "forces",
+                "stress",
+                "dipole",
+            ]
+        else:
+            raise ValueError(
+                f"Give a valid model_type: [MACE, DipoleMACE, EnergyDipoleMACE], {model_type} not supported"
+            )
+
+        if model_paths is not None:
+            if isinstance(model_paths, str):
+                # Find all models that satisfy the wildcard (e.g. mace_model_*.pt)
+                model_paths_glob = glob(model_paths)
+
+                if len(model_paths_glob) == 0:
+                    raise ValueError(f"Couldn't find MACE model files: {model_paths}")
+
+                model_paths = model_paths_glob
+            elif isinstance(model_paths, Path):
+                model_paths = [model_paths]
+
+            if len(model_paths) == 0:
+                raise ValueError("No mace file names supplied")
+            self.num_models = len(model_paths)
+
+            # Load models from files
+            self.models = [
+                torch.load(f=model_path, map_location=device)
+                for model_path in model_paths
+            ]
+            if enable_cueq:
+                logging.info("Converting models to CuEq for acceleration")
+                self.models = [
+                    run_e3nn_to_cueq(model, device=device).to(device)
+                    for model in self.models
+                ]
+
+        elif models is not None:
+            if not isinstance(models, list):
+                models = [models]
+
+            if len(models) == 0:
+                raise ValueError("No models supplied")
+
+            self.models = models
+            self.num_models = len(models)
+
+        if self.num_models > 1:
+            logging.info(f"Running committee mace with {self.num_models} models")
+
+            if model_type in ["MACE", "EnergyDipoleMACE"]:
+                self.implemented_properties.extend(
+                    ["energies", "energy_var", "forces_comm", "stress_var"]
+                )
+            elif model_type == "DipoleMACE":
+                self.implemented_properties.extend(["dipole_var"])
+
+        if compile_mode is not None:
+            logging.info(f"Torch compile is enabled with mode: {compile_mode}")
+            self.models = [
+                torch.compile(
+                    prepare(extract_model)(model=model, map_location=device),
+                    mode=compile_mode,
+                    fullgraph=fullgraph,
+                )
+                for model in self.models
+            ]
+            self.use_compile = True
+        else:
+            self.use_compile = False
+
+        # Ensure all models are on the same device
+        for model in self.models:
+            model.to(device)
+
+        r_maxs = [model.magmom_mace.r_max.cpu() for model in self.models]
+        r_maxs = np.array(r_maxs)
+        if not np.all(r_maxs == r_maxs[0]):
+            raise ValueError(f"committee r_max are not all the same {' '.join(r_maxs)}")
+        self.r_max = float(r_maxs[0])
+
+        self.device = torch_tools.init_device(device)
+        self.energy_units_to_eV = energy_units_to_eV
+        self.length_units_to_A = length_units_to_A
+        self.z_table = utils.AtomicNumberTable(
+            [int(z) for z in self.models[0].magmom_mace.atomic_numbers]
+        )
+        self.charges_key = charges_key
+        self.magmom_key = magmom_key
+
+        try:
+            self.available_heads = self.models[0].magmom_mace.heads
+        except AttributeError:
+            self.available_heads = ["Default"]
+        kwarg_head = kwargs.get("head", None)
+        if kwarg_head is not None:
+            self.head = kwarg_head
+            if isinstance(self.head, str):
+                if self.head not in self.available_heads:
+                    last_head = self.available_heads[-1]
+                    logging.warning(
+                        f"Head {self.head} not found in available heads {self.available_heads}, defaulting to the last head: {last_head}"
+                    )
+                    self.head = last_head
+        elif len(self.available_heads) == 1:
+            self.head = self.available_heads[0]
+        else:
+            self.head = [
+                head for head in self.available_heads if head.lower() == "default"
+            ]
+            if len(self.head) == 0:
+                raise ValueError(
+                    "Head keyword was not provided, and no head in the model is 'default'. "
+                    "Please provide a head keyword to specify the head you want to use. "
+                    f"Available heads are: {self.available_heads}"
+                )
+            self.head = self.head[0]
+
+        logging.info(f"Using head {self.head} out of  {self.available_heads}")
+
+        model_dtype = get_model_dtype(self.models[0])
+        if default_dtype == "":
+            logging.warning(
+                f"No dtype selected, switching to {model_dtype} to match model dtype."
+            )
+            default_dtype = model_dtype
+        if model_dtype != default_dtype:
+            logging.warning(
+                f"Default dtype {default_dtype} does not match model dtype {model_dtype}, converting models to {default_dtype}."
+            )
+            if default_dtype == "float64":
+                self.models = [model.double() for model in self.models]
+            elif default_dtype == "float32":
+                self.models = [model.float() for model in self.models]
+        self.default_dtype = default_dtype
+        
+        for model in self.models:
+            for param in model.parameters():
+                param.requires_grad = False
+
+        if pad_num_atoms <= 0:
+            pad_num_atoms = int(os.environ.get("MACE_ASE_PAD_NUM_ATOMS", "0"))
+        if pad_num_edges <= 0:
+            pad_num_edges = int(os.environ.get("MACE_ASE_PAD_NUM_EDGES", "0"))
+        self.pad_num_atoms = max(int(pad_num_atoms), 0)
+        self.pad_num_edges = max(int(pad_num_edges), 0)
+        self._padding_initialized = self.pad_num_atoms > 0 and self.pad_num_edges > 0
+
+        if warmup and self.use_compile:
+            logging.info("Warmup requested -- will trigger on first calculate() call")
+
+    def check_state(self, atoms, tol: float = 1e-15) -> list:
+        """
+        Check for any system changes since the last calculation.
+
+        Args:
+            atoms (ase.Atoms): The atomic structure to check.
+            tol (float): Tolerance for detecting changes.
+
+        Returns:
+            list: A list of changes detected in the system.
+        """
+
+        def _infos_equal(a: dict, b: dict) -> bool:
+            if a.keys() != b.keys():
+                return False
+            for k in a:
+                va, vb = a[k], b[k]
+                if isinstance(va, np.ndarray) or isinstance(vb, np.ndarray):
+                    continue
+                if va != vb:
+                    return False
+            return True
+
+        state = super().check_state(atoms, tol=tol)
+        if (not state) and (not _infos_equal(self.atoms.info, atoms.info)):
+            state.append("info")
+        return state
+
+    @staticmethod
+    def _slice_real_outputs(
+        out: Dict[str, Union[torch.Tensor, None]], num_real_atoms: int
+    ) -> Dict[str, Union[torch.Tensor, None]]:
+        """Strip padding from model outputs, keeping only real-atom results."""
+        graph_level_keys = {
+            "energy",
+            "stress",
+            "virials",
+            "dipole",
+            "polarizability",
+            "polarizability_sh",
+            "displacement",
+            "contributions",
+            "one_body_magmom_energy",
+            "scf_steps",
+            "scf_energy_history",
+            "grad_norm_history",
+            "grad_inf_history",
+            "step_inf_history",
+        }
+        atom_level_keys = {
+            "node_energy",
+            "forces",
+            "charges",
+            "atomic_stresses",
+            "atomic_virials",
+            "atomic_dipoles",
+            "node_feats",
+            "equilibrated_magmom",
+            "magmom_history",
+            "grad_history",
+        }
+        sliced: Dict[str, Union[torch.Tensor, None]] = {}
+        for key, value in out.items():
+            if value is None or not torch.is_tensor(value):
+                sliced[key] = value
+            elif key in graph_level_keys and value.ndim > 0:
+                sliced[key] = value[0]
+            elif key in atom_level_keys:
+                sliced[key] = value[:num_real_atoms]
+            else:
+                sliced[key] = value
+        return sliced
+
+    def _auto_estimate_padding(self, real_num_atoms: int, real_num_edges: int):
+        """Set padding targets on first call based on actual graph size."""
+        if self._padding_initialized:
+            return
+        self.pad_num_atoms = real_num_atoms
+        self.pad_num_edges = _round_up(
+            int(real_num_edges * _EDGE_PAD_HEADROOM), _EDGE_PAD_MULTIPLE
+        )
+        self._padding_initialized = True
+        logging.info(
+            "Auto-estimated padding: %d atoms, %d edges (real: %d atoms, %d edges)",
+            self.pad_num_atoms,
+            self.pad_num_edges,
+            real_num_atoms,
+            real_num_edges,
+        )
+
+    def _create_result_tensors(
+        self, model_type: str, num_models: int, num_atoms: int
+    ) -> dict:
+        """
+        Create tensors to store the results of the committee
+        :param model_type: str, type of model to load
+            Options: [MACE, DipoleMACE, EnergyDipoleMACE]
+        :param num_models: int, number of models in the committee
+        :return: tuple of torch tensors
+        """
+        dict_of_tensors = {}
+        if model_type in ["MACE", "EnergyDipoleMACE"]:
+            energies = torch.zeros(num_models, device=self.device)
+            node_energy = torch.zeros(num_models, num_atoms, device=self.device)
+            forces = torch.zeros(num_models, num_atoms, 3, device=self.device)
+            stress = torch.zeros(num_models, 3, 3, device=self.device)
+            dict_of_tensors.update(
+                {
+                    "energies": energies,
+                    "node_energy": node_energy,
+                    "forces": forces,
+                    "stress": stress,
+                }
+            )
+        if model_type in ["EnergyDipoleMACE", "DipoleMACE"]:
+            dipole = torch.zeros(num_models, 3, device=self.device)
+            dict_of_tensors.update({"dipole": dipole})
+        return dict_of_tensors
+
+    def _atoms_to_batch(self, atoms):
+        self.arrays_keys.update({self.charges_key: "charges", self.magmom_key : "dft_magmom"})
+        keyspec = mace_data.KeySpecification(
+            info_keys=self.info_keys, arrays_keys=self.arrays_keys)
+        with torch_tools.default_dtype(self.default_dtype):
+            config = mace_data.config_from_atoms(
+                atoms, key_specification=keyspec, head_name=self.head
+            )
+            real_graph = mace_data.AtomicData.from_config(
+                config,
+                z_table=self.z_table,
+                cutoff=self.r_max,
+                heads=self.available_heads,
+            )
+
+        real_num_atoms = int(real_graph["node_attrs"].shape[0])
+        real_num_edges = int(real_graph["edge_index"].shape[1])
+
+        if self.use_compile and not self._padding_initialized:
+            self._auto_estimate_padding(real_num_atoms, real_num_edges)
+
+        if real_num_edges > self.pad_num_edges and self._padding_initialized:
+            old = self.pad_num_edges
+            self.pad_num_edges = _round_up(
+                int(real_num_edges * _EDGE_PAD_HEADROOM), _EDGE_PAD_MULTIPLE
+            )
+            logging.warning(
+                "Edge count %d exceeded pad budget %d -- bumping to %d "
+                "(will trigger one recompile)",
+                real_num_edges,
+                old,
+                self.pad_num_edges,
+            )
+
+        target_num_atoms = max(real_num_atoms, self.pad_num_atoms)
+        target_num_edges = max(real_num_edges, self.pad_num_edges)
+        pad_atoms = target_num_atoms - real_num_atoms
+        pad_edges = target_num_edges - real_num_edges
+
+        data_list = [real_graph]
+        if pad_atoms > 0 or pad_edges > 0:
+            from mace.data.padding_tools import build_fake_padding_graph
+
+            if pad_edges > 0 >= pad_atoms:
+                pad_atoms = 1
+            data_list.append(
+                build_fake_padding_graph(
+                    real_graph,
+                    num_atoms=pad_atoms,
+                    num_edges=pad_edges,
+                    r_max=self.r_max,
+                )
+            )
+
+        batch = torch_geometric.Batch.from_data_list(data_list).to(self.device)
+        return batch
+
+    def _clone_batch(self, batch):
+        batch_clone = batch.clone()
+        if self.use_compile:
+            batch_clone["node_attrs"].requires_grad_(True)
+            batch_clone["positions"].requires_grad_(True)
+        return batch_clone
+
+    # pylint: disable=dangerous-default-value
+    def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        """
+        Calculate properties.
+        :param atoms: ase.Atoms object
+        :param properties: [str], properties to be computed, used by ASE internally
+        :param system_changes: [str], system changes since last calculation, used by ASE internally
+        :return:
+        """
+        # call to base-class to set atoms attribute
+        Calculator.calculate(self, atoms)
+
+        batch_base = self._atoms_to_batch(atoms)
+        num_real_atoms = len(atoms)
+        is_padded = self.pad_num_atoms > 0 or self.pad_num_edges > 0
+
+        if self.model_type in ["MACE", "EnergyDipoleMACE"]:
+            batch = self._clone_batch(batch_base)
+            node_heads = batch["head"][batch["batch"]][:num_real_atoms]
+            num_atoms_arange = torch.arange(num_real_atoms)
+            node_e0 = self.models[0].magmom_mace.atomic_energies_fn(batch["node_attrs"][:num_real_atoms])[
+                num_atoms_arange, node_heads
+            ]
+            compute_stress = not self.use_compile
+        else:
+            compute_stress = False
+
+        ret_tensors = self._create_result_tensors(
+            self.model_type, self.num_models, num_real_atoms
+        )
+
+        if "applied_B_field" in atoms.arrays.keys():
+            applied_B_field = torch.tensor(atoms.arrays['applied_B_field']).to(self.device)
+        else:
+            applied_B_field = None
+        for i, model in enumerate(self.models):
+            batch = self._clone_batch(batch_base)
+            out = model(
+                batch.to_dict(),
+                compute_stress=compute_stress,
+                training=self.use_compile,
+                applied_B_field=applied_B_field,
+            )
+
+            if is_padded:
+                out = self._slice_real_outputs(out, num_real_atoms)
+
+            if self.model_type in ["MACE", "EnergyDipoleMACE"]:
+                ret_tensors["energies"][i] = out["energy"].detach()
+                ret_tensors["node_energy"][i] = (out["node_energy"] - node_e0).detach()
+                ret_tensors["forces"][i] = out["forces"].detach()
+                if out["stress"] is not None:
+                    ret_tensors["stress"][i] = out["stress"].detach()
+            if self.model_type in ["DipoleMACE", "EnergyDipoleMACE"]:
+                ret_tensors["dipole"][i] = out["dipole"].detach()
+            if "equilibrated_magmom" in out.keys():
+                assert len(self.models) == 1, "magnetic mace committee not supported"
+                ret_tensors["dft_magmom"] = out["equilibrated_magmom"].detach()
+            if "magmom_history" in out.keys():
+                ret_tensors["magmom_history"] = out["magmom_history"].detach()
+            if "grad_norm_history" in out.keys():
+                ret_tensors["grad_norm_history"] = out["grad_norm_history"].detach()
+            if "one_body_magmom_energy" in out.keys():
+                ret_tensors["one_body_magmom_energy"] = out["one_body_magmom_energy"] # .detach()
+            if "scf_steps" in out.keys():
+                ret_tensors["scf_steps"] = out["scf_steps"] # .detach()
+            if "scf_energy_history" in out.keys():
+                ret_tensors["scf_energy_history"] = out["scf_energy_history"] # .detach()
+            if "grad_history" in out.keys():
+                ret_tensors["grad_history"] = out["grad_history"]
+            if "grad_inf_history" in out.keys():
+                ret_tensors["grad_inf_history"] = out["grad_inf_history"]
+            if "step_inf_history" in out.keys():
+                ret_tensors["step_inf_history"] = out["step_inf_history"]
+
+        self.results = {}
+        if self.model_type in ["MACE", "EnergyDipoleMACE"]:
+            self.results["energy"] = (
+                torch.mean(ret_tensors["energies"], dim=0).cpu().item()
+                * self.energy_units_to_eV
+            )
+            self.results["free_energy"] = self.results["energy"]
+            self.results["node_energy"] = (
+                torch.mean(ret_tensors["node_energy"], dim=0).cpu().numpy()
+            )
+            self.results["forces"] = (
+                torch.mean(ret_tensors["forces"], dim=0).cpu().numpy()
+                * self.energy_units_to_eV
+                / self.length_units_to_A
+            )
+            
+            if "scf_energy_history" in ret_tensors.keys():
+                self.results['scf_energy_history'] = ret_tensors["scf_energy_history"].cpu().numpy()
+
+            if "dft_magmom" in ret_tensors.keys():
+                self.results['dft_magmom'] = ret_tensors["dft_magmom"].cpu().numpy()
+
+            if "magmom_history" in ret_tensors.keys():
+                self.results['magmom_history'] = ret_tensors["magmom_history"].cpu().numpy()
+
+            if "grad_norm_history" in ret_tensors.keys():
+                self.results['grad_norm_history'] = ret_tensors["grad_norm_history"].cpu().numpy()
+
+            if "one_body_magmom_energy" in ret_tensors.keys():
+                self.results['one_body_magmom_energy'] = ret_tensors["one_body_magmom_energy"].cpu().detach().numpy()
+
+            if "grad_history" in ret_tensors.keys():
+                self.results['grad_history'] = ret_tensors["grad_history"].cpu().numpy()
+
+            if "grad_inf_history" in ret_tensors.keys():
+                self.results['grad_inf_history'] = ret_tensors["grad_inf_history"].cpu().numpy()
+
+            if "step_inf_history" in ret_tensors.keys():
+                self.results['step_inf_history'] = ret_tensors["step_inf_history"].cpu().numpy()
+
+            if self.num_models > 1:
+                assert 1 == 0
+                self.results["energies"] = (
+                    ret_tensors["energies"].cpu().numpy() * self.energy_units_to_eV
+                )
+                self.results["energy_var"] = (
+                    torch.var(ret_tensors["energies"], dim=0, unbiased=False)
+                    .cpu()
+                    .item()
+                    * self.energy_units_to_eV
+                )
+                self.results["forces_comm"] = (
+                    ret_tensors["forces"].cpu().numpy()
+                    * self.energy_units_to_eV
+                    / self.length_units_to_A
+                )
+            if out["stress"] is not None:
+                self.results["stress"] = full_3x3_to_voigt_6_stress(
+                    torch.mean(ret_tensors["stress"], dim=0).cpu().numpy()
+                    * self.energy_units_to_eV
+                    / self.length_units_to_A**3
+                )
+                if self.num_models > 1:
+                    self.results["stress_var"] = full_3x3_to_voigt_6_stress(
+                        torch.var(ret_tensors["stress"], dim=0, unbiased=False)
+                        .cpu()
+                        .numpy()
+                        * self.energy_units_to_eV
+                        / self.length_units_to_A**3
+                    )
+        if self.model_type in ["DipoleMACE", "EnergyDipoleMACE"]:
+            self.results["dipole"] = (
+                torch.mean(ret_tensors["dipole"], dim=0).cpu().numpy()
+            )
+            if self.num_models > 1:
+                self.results["dipole_var"] = (
+                    torch.var(ret_tensors["dipole"], dim=0, unbiased=False)
+                    .cpu()
+                    .numpy()
+                )
+        # modify this inpalce
+        atoms.arrays['dft_magmom'] = self.results["dft_magmom"]
+
+        if 'scf_energy_history' in self.results:
+            atoms.info['scf_energy_history'] = self.results["scf_energy_history"]
+
+        if 'magmom_history' in self.results:
+            atoms.info['magmom_history'] = self.results["magmom_history"]
+
+        if 'grad_norm_history' in self.results:
+            atoms.info['grad_norm_history'] = self.results["grad_norm_history"]
+
+        if 'scf_steps' in ret_tensors:
+            atoms.info['scf_steps'] = ret_tensors["scf_steps"]
+
+    def get_hessian(self, atoms=None):
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+        
+        num_real_atoms = len(atoms)
+        is_padded = self.pad_num_atoms > 0 or self.pad_num_edges > 0
+        batch = self._atoms_to_batch(atoms)
+        
+        hessians = []
+        for model in self.models:
+            out = model(
+                self._clone_batch(batch).to_dict(),
+                compute_hessian=True,
+                compute_stress=False,
+                training=self.use_compile,
+            )
+            h = out["hessian"]
+            if is_padded:
+                h = h[:num_real_atoms, :, :num_real_atoms, :]
+            hessians.append(h.detach().cpu().numpy())
+            
+        if self.num_models == 1:
+            return hessians[0]
+        return hessians
+
+    def get_descriptors(self, atoms=None, invariants_only=True, num_layers=-1):
+        """Extracts the descriptors from MACE model.
+        :param atoms: ase.Atoms object
+        :param invariants_only: bool, if True only the invariant descriptors are returned
+        :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
+        :return: np.ndarray (num_atoms, num_interactions, invariant_features) of invariant descriptors if num_models is 1 or list[np.ndarray] otherwise
+        """
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+            
+        num_interactions = int(self.models[0].magmom_mace.num_interactions)
+        if num_layers == -1:
+            num_layers = num_interactions
+            
+        num_real_atoms = len(atoms)
+        is_padded = self.pad_num_atoms > 0 or self.pad_num_edges > 0
+        batch = self._atoms_to_batch(atoms)
+        
+        descriptors = []
+        for model in self.models:
+            out = model(batch.to_dict())
+            if is_padded:
+                out = self._slice_real_outputs(out, num_real_atoms)
+            descriptors.append(out["node_feats"])
+
+        irreps_out = o3.Irreps(str(self.models[0].magmom_mace.products[0].linear.irreps_out))
+        l_max = irreps_out.lmax
+        num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+        per_layer_features = [irreps_out.dim for _ in range(num_interactions)]
+        per_layer_features[-1] = (
+            num_invariant_features  # Equivariant features not created for the last layer
+        )
+
+        if invariants_only:
+            descriptors = [
+                extract_invariant(
+                    descriptor,
+                    num_layers=num_layers,
+                    num_features=num_invariant_features,
+                    l_max=l_max,
+                )
+                for descriptor in descriptors
+            ]
+        to_keep = np.sum(per_layer_features[:num_layers])
+        descriptors = [
+            descriptor[:, :to_keep].detach().cpu().numpy() for descriptor in descriptors
+        ]
+
+        if self.num_models == 1:
+            return descriptors[0]
+        return descriptors
+
+    def clean_cache_magmom(self,):
+        for model in self.models:
+            if hasattr(model, "cache_magmom"):
+                model.cache_magmom = None

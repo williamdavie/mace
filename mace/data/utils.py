@@ -17,6 +17,13 @@ import numpy as np
 from mace.tools import AtomicNumberTable, DefaultKeys
 
 Positions = np.ndarray  # [..., 3]
+#Forces = np.ndarray  # [..., 3]
+
+#Stress = np.ndarray  # [6, ], [3,3], [9, ]
+#Virials = np.ndarray  # [6, ], [3,3], [9, ]
+#Charges = np.ndarray  # [..., 1]
+#Magmom = np.ndarray  # [..., 3]
+#Magforces = np.ndarray # [..., 3]
 Cell = np.ndarray  # [3,3]
 Pbc = tuple  # (3,)
 
@@ -61,7 +68,7 @@ def update_keyspec_from_kwargs(
         "polarizability_key",
         "total_spin_key",
     ]
-    arrays = ["forces_key", "charges_key"]
+    arrays = ["forces_key", "charges_key", "magmom_key"]
     info_keys = {}
     arrays_keys = {}
     for key in infos:
@@ -96,7 +103,6 @@ class Configuration:
     property_weights: Dict[str, float]
     cell: Optional[Cell] = None
     pbc: Optional[Pbc] = None
-
     weight: float = 1.0  # weight of config in loss
     config_type: str = DEFAULT_CONFIG_TYPE  # config_type of config
     head: str = "Default"  # head used to compute the config
@@ -249,10 +255,12 @@ def load_from_xyz(
     energy_key = key_specification.info_keys["energy"]
     forces_key = key_specification.arrays_keys["forces"]
     stress_key = key_specification.info_keys["stress"]
+    magmom_key = key_specification.arrays_keys["magmom"]
     head_key = key_specification.info_keys["head"]
     original_energy_key = energy_key
     original_forces_key = forces_key
     original_stress_key = stress_key
+    original_magmom_key = magmom_key
     if energy_key == "energy":
         logging.warning(
             "Since ASE version 3.23.0b1, using energy_key 'energy' is no longer safe when communicating between MACE and ASE. We recommend using a different key, rewriting 'energy' to 'REF_energy'. You need to use --energy_key='REF_energy' to specify the chosen key name."
@@ -287,13 +295,16 @@ def load_from_xyz(
                 atoms.info["REF_stress"] = atoms.get_stress()
             except Exception as e:  # pylint: disable=W0703
                 atoms.info["REF_stress"] = None
+                
 
     final_energy_key = key_specification.info_keys["energy"]
     final_forces_key = key_specification.arrays_keys["forces"]
     final_dipole_key = key_specification.info_keys.get("dipole", "REF_dipole")
+    final_magmom_key = key_specification.arrays_keys["magmom"]
     has_energy = any(final_energy_key in atoms.info for atoms in atoms_list)
     has_forces = any(final_forces_key in atoms.arrays for atoms in atoms_list)
     has_dipole = any(final_dipole_key in atoms.info for atoms in atoms_list)
+    has_forces = any(final_magmom_key in atoms.arrays for atoms in atoms_list)
 
     if not has_energy and not has_forces and not has_dipole:
         msg = f"None of '{final_energy_key}', '{final_forces_key}', and '{final_dipole_key}' found in '{file_path}'."
@@ -355,6 +366,7 @@ def load_from_xyz(
     key_specification.info_keys["energy"] = original_energy_key
     key_specification.arrays_keys["forces"] = original_forces_key
     key_specification.info_keys["stress"] = original_stress_key
+    key_specification.info_keys["magmom"] = original_magmom_key
     return atomic_energies_dict, configs
 
 

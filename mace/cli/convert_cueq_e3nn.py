@@ -65,6 +65,37 @@ def get_kmax_pairs(
     raise NotImplementedError(f"Correlation {correlation} not supported")
 
 
+def get_transfer_keys(num_layers: int) -> List[str]:
+    """Get list of keys that need to be transferred"""
+    return [
+        "node_embedding.linear.weight",
+        "radial_embedding.bessel_fn.bessel_weights",
+        "atomic_energies_fn.atomic_energies",
+        "readouts.0.linear.weight",
+        "scale_shift.scale",
+        "scale_shift.shift",
+        *[f"readouts.1.linear_{i}.weight" for i in range(1, 3)],
+    ] + [
+        s
+        for j in range(num_layers)
+        for s in [
+            f"interactions.{j}.linear_up.weight",
+            *[f"interactions.{j}.conv_tp_weights.layer{i}.weight" for i in range(4)],
+            f"interactions.{j}.linear.weight",
+            f"interactions.{j}.skip_tp.weight",
+            f"products.{j}.linear.weight",
+        ]
+    ] + [
+        s
+        for j in range(num_layers)
+            for s in [
+                f"interactions.{j}.magmom_linear.weight",
+                f"interactions.{j}.magmom_skip_tp.weight",
+                f"products.{j}.linear_ori.weight",
+            ]
+    ]
+
+
 def transfer_symmetric_contractions(
     source_dict: Dict[str, torch.Tensor],
     target_dict: Dict[str, torch.Tensor],
@@ -163,6 +194,21 @@ def transfer_weights(
         use_reduced_cg,
         keep_last_layer_irreps,
     )
+    # Transfer main weights
+    transfer_keys = get_transfer_keys(num_layers)
+    for key in transfer_keys:
+        if key in source_dict:  # Check if key exists
+            target_dict[key] = source_dict[key]
+        else:
+            logging.warning(f"Key {key} not found in source model")
+
+    # Transfer symmetric contractions
+    transfer_symmetric_contractions(source_dict, target_dict, max_L, correlation, num_layers)
+
+    # Unsqueeze linear and skip_tp layers
+    for key in source_dict.keys():
+        if any(x in key for x in ["linear", "skip_tp"]) and "weight" in key:
+            target_dict[key] = target_dict[key].squeeze(0)
 
     # Transfer remaining matching keys
     transferred_keys = set()
@@ -217,9 +263,15 @@ def run(input_model, output_model="_e3nn.model", device="cpu", return_model=True
     correlation = config["correlation"]
     use_reduced_cg = config.get("use_reduced_cg", True)
     keep_last_layer_irreps = config.get("keep_last_layer_irreps", False)
+    num_layers = config["num_interactions"]
 
     # Remove CuEq config
     config.pop("cueq_config", None)
+
+    if "Magnetic" not in str(source_model.__class__):
+        config.pop("m_max", None)
+        config.pop("max_m_ell", None)
+        config.pop("num_mag_radial_basis", None)
 
     # Create new model without CuEq config
     logging.info("Creating new model without CuEq settings")

@@ -1,6 +1,10 @@
+import logging
 from typing import Callable, Dict, Optional, Type
 
 import torch
+
+logging.getLogger("cuequivariance_torch.primitives.tensor_product").setLevel(logging.WARNING)
+logging.getLogger("cuequivariance_torch.primitives.symmetric_tensor_product").setLevel(logging.WARNING)
 
 from .blocks import (
     AtomicEnergiesBlock,
@@ -22,6 +26,19 @@ from .blocks import (
     RealAgnosticInteractionBlock,
     RealAgnosticResidualInteractionBlock,
     RealAgnosticResidualNonLinearInteractionBlock,
+    MagneticRealAgnosticDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock,
+    MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock,
+    MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
+    MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
+    MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+    MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock,
     ScaleShiftBlock,
 )
 from .extensions import PolarMACE
@@ -37,6 +54,7 @@ from .loss import (
     WeightedEnergyForcesVirialsLoss,
     WeightedForcesLoss,
     WeightedHuberEnergyForcesStressLoss,
+    EvenSpline1BodyLoss,
 )
 from .models import (
     MACE,
@@ -44,9 +62,30 @@ from .models import (
     AtomicDipolesMACE,
     EnergyDipolesMACE,
     ScaleShiftMACE,
+    #
+    MagneticSCFMACE,
+    MagneticScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE,
+    MagneticSolidHarmonicsScaleShiftMACE,
+    MagneticSolidHarmonicsSeparateReadoutScaleShiftMACE,
+    MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsFlexibleSOScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesFixingGinzburgSelfMagmomScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomFixingScaleShiftMACE,
+    MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesEvenSplineSelfMagmomScaleShiftMACE,
+    #
+    EvenMagSaturationBarrier
 )
+
 from .radial import BesselBasis, GaussianBasis, PolynomialCutoff, ZBLBasis
-from .symmetric_contraction import SymmetricContraction
+from .symmetric_contraction import SymmetricContraction, NonSOCSymmetricContraction
 from .utils import (
     compute_avg_num_neighbors,
     compute_dielectric_gradients,
@@ -64,8 +103,22 @@ interaction_classes: Dict[str, Type[InteractionBlock]] = {
     "RealAgnosticInteractionBlock": RealAgnosticInteractionBlock,
     "RealAgnosticDensityInteractionBlock": RealAgnosticDensityInteractionBlock,
     "RealAgnosticDensityResidualInteractionBlock": RealAgnosticDensityResidualInteractionBlock,
-    "RealAgnosticResidualNonLinearInteractionBlock": RealAgnosticResidualNonLinearInteractionBlock,
+    "MagneticRealAgnosticDensityInteractionBlock": MagneticRealAgnosticDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialDensityInteractionBlock": MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock": MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock": MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock": MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
+    "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+
 }
+
 
 readout_classes: Dict[str, Type[LinearReadoutBlock]] = {
     "LinearReadoutBlock": LinearReadoutBlock,
@@ -74,6 +127,20 @@ readout_classes: Dict[str, Type[LinearReadoutBlock]] = {
     "NonLinearReadoutBlock": NonLinearReadoutBlock,
     "NonLinearBiasReadoutBlock": NonLinearBiasReadoutBlock,
     "GeneralNonLinearBiasReadoutBlock": GeneralNonLinearBiasReadoutBlock,
+    "MagneticRealAgnosticDensityInteractionBlock": MagneticRealAgnosticDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialDensityInteractionBlock": MagneticRealAgnosticSeparateRadialDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock": MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock": MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock,
+    "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock": MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock,
+    "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock": MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock,
+    "MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock": MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+    "MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock": MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock,
+
 }
 
 scaling_classes: Dict[str, Callable] = {
@@ -112,6 +179,9 @@ __all__ = [
     "AtomicDielectricMACE",
     "EnergyDipolesMACE",
     "PolarMACE",
+    "MagneticScaleShiftMACE",
+    "MagneticSolidHarmonicsScaleShiftMACE",
+    "MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE",
     "WeightedEnergyForcesLoss",
     "WeightedForcesLoss",
     "WeightedEnergyForcesVirialsLoss",
@@ -121,7 +191,9 @@ __all__ = [
     "WeightedHuberEnergyForcesStressLoss",
     "UniversalLoss",
     "WeightedEnergyForcesL1L2Loss",
+    "EvenSpline1BodyLoss",
     "SymmetricContraction",
+    "NonSOCSymmetricContraction",
     "interaction_classes",
     "compute_mean_std_atomic_inter_energy",
     "compute_avg_num_neighbors",

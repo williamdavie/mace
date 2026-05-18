@@ -45,6 +45,36 @@ def tp_out_irreps_with_instructions(
 
     return irreps_out, instructions
 
+def tp_out_irreps_with_instructions_magmom(
+    irreps1: o3.Irreps, irreps2: o3.Irreps, target_irreps: o3.Irreps
+) -> Tuple[o3.Irreps, List]:
+    trainable = True
+
+    # Collect possible irreps and their instructions
+    irreps_out_list: List[Tuple[int, o3.Irreps]] = []
+    instructions = []
+    for i, (mul, ir_in) in enumerate(irreps1):
+        for j, (_, ir_edge) in enumerate(irreps2):
+            for ir_out in ir_in * ir_edge:  # | l1 - l2 | <= l <= l1 + l2
+                if ir_out in target_irreps:
+                    k = len(irreps_out_list)  # instruction index
+                    irreps_out_list.append((mul, ir_out))
+                    instructions.append((i, j, k, "uvu", trainable))
+
+    # We sort the output irreps of the tensor product so that we can simplify them
+    # when they are provided to the second o3.Linear
+    irreps_out = o3.Irreps(irreps_out_list)
+    irreps_out, permut, _ = irreps_out.sort()
+
+    # Permute the output indexes of the instructions to match the sorted irreps:
+    instructions = [
+        (i_in1, i_in2, permut[i_out], mode, train)
+        for i_in1, i_in2, i_out, mode, train in instructions
+    ]
+
+    instructions = sorted(instructions, key=lambda x: x[2])
+
+    return irreps_out, instructions
 
 def linear_out_irreps(irreps: o3.Irreps, target_irreps: o3.Irreps) -> o3.Irreps:
     # Assuming simplified irreps
@@ -70,7 +100,8 @@ class reshape_irreps(torch.nn.Module):
         self, irreps: o3.Irreps, cueq_config: Optional[CuEquivarianceConfig] = None
     ) -> None:
         super().__init__()
-        self.irreps = o3.Irreps(irreps)
+        
+        self.irreps = o3.Irreps(str(irreps))
         self.cueq_config = cueq_config
         self.dims = []
         self.muls = []
@@ -106,6 +137,75 @@ class reshape_irreps(torch.nn.Module):
             else:
                 return torch.cat(out, dim=-1)
         return torch.cat(out, dim=-1)
+
+# @compile_mode("script")
+# class inverse_reshape_irreps(torch.nn.Module):
+#     def __init__(self, irreps: o3.Irreps) -> None:
+#         super().__init__()
+#         self.irreps = o3.Irreps(irreps)
+#         self.dims = []
+#         self.muls = []
+#         for mul, ir in self.irreps:
+#             d = ir.dim
+#             self.dims.append(d)
+#             self.muls.append(mul)
+
+#     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+#         out = []
+#         dsum = 0
+#         for mul, d in zip(self.muls, self.dims):
+#             field = tensor[:,:,dsum:dsum+d]  # [batch, mul, repr]
+#             field = field.reshape(tensor.shape[0], -1)  # Flatten [batch, mul * repr]
+#             dsum += d
+#             out.append(field)
+#         return torch.cat(out, dim=-1)
+
+@compile_mode("script")
+class inverse_reshape_irreps(torch.nn.Module):
+    def __init__(
+        self,
+        irreps: o3.Irreps,
+        cueq_config: Optional[CuEquivarianceConfig] = None,
+    ) -> None:
+        super().__init__()
+        self.irreps = o3.Irreps(str(irreps))
+        self.cueq_config = cueq_config
+        self.dims = []
+        self.muls = []
+        for mul, ir in self.irreps:
+            self.dims.append(ir.dim)
+            self.muls.append(mul)
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Inverse of reshape_irreps:
+        - If layout_str == "mul_ir": input is [batch, mul, sum_d], slice along last dim.
+        - Else:                       input is [batch, sum_d, mul], slice along second-to-last dim.
+        Returns [batch, total_dim].
+        """
+        batch = tensor.shape[0]
+        out = []
+        dsum = 0
+
+        if hasattr(self, "cueq_config") and self.cueq_config is not None:
+            mul_ir = (self.cueq_config.layout_str == "mul_ir")
+        else:
+            # Default matches reshape_irreps default (mul, d) then concat along last dim
+            mul_ir = True
+
+        for mul, d in zip(self.muls, self.dims):
+            if mul_ir:
+                # tensor: [batch, mul, sum_d]  -> slice along last dim
+                field = tensor[:, :, dsum:dsum + d]           # [B, mul, d]
+                field = field.reshape(batch, -1)              # [B, mul*d]
+            else:
+                # tensor: [batch, sum_d, mul] -> slice along second-to-last dim
+                field = tensor[:, dsum:dsum + d, :]           # [B, d, mul]
+                field = field.reshape(batch, -1)              # [B, d*mul]
+            dsum += d
+            out.append(field)
+        import pdb; pdb.set_trace();
+        return torch.cat(out, dim=-1)                         # [B, total_dim]
 
 
 def mask_head(x: torch.Tensor, head: torch.Tensor, num_heads: int) -> torch.Tensor:

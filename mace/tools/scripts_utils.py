@@ -265,6 +265,26 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         )
     except AttributeError:
         correlation = model.products[0].symmetric_contractions.contraction_degree
+    
+    # infer contraction classes from instantiated product blocks
+    contraction_cls_first = getattr(model.products[0], "contraction_cls", "SymmetricContraction")
+    contraction_cls = getattr(model.products[-1], "contraction_cls", contraction_cls_first)
+
+    # for magnetic mace
+    m_max = getattr(model, "m_max", None)
+    num_mag_radial_basis = getattr(getattr(model, "mag_radial_embedding", None), "num_basis", None)
+    try:
+        max_m_ell = int(model.mag_solid_harmoics.SH.l_max())
+    except (AttributeError, TypeError):
+        max_m_ell = None
+
+    ##
+    radial_MLP = None
+    if hasattr(model.interactions[0], "conv_tp_weights"):
+        radial_MLP = model.interactions[0].conv_tp_weights.hs[1:-1]
+    else:
+        radial_MLP = model.interactions[0].conv_tp_m_weights.hs[1:-1]
+
     config = {
         "r_max": model.r_max.item(),
         "num_bessel": len(model.radial_embedding.bessel_fn.bessel_weights),
@@ -317,6 +337,12 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "atomic_inter_scale": scale.cpu().numpy(),
         "atomic_inter_shift": shift.cpu().numpy(),
         "heads": heads,
+        ## for magnetic mace
+        "m_max": m_max,
+        "num_mag_radial_basis": num_mag_radial_basis,
+        "max_m_ell": max_m_ell,
+        "contraction_cls": contraction_cls,
+        "contraction_cls_first": contraction_cls_first,
     }
     if model.__class__.__name__ == "AtomicDielectricMACE":
         config["use_polarizability"] = model.use_polarizability
@@ -357,6 +383,8 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         ).copy()
         config["field_readout_config"] = getattr(model, "_field_readout_config").copy()
         config["keep_last_layer_irreps"] = model.keep_last_layer_irreps
+    if hasattr(model, "onebody_magmombasis_coeffs"):
+        config["num_mag_radial_basis_one_body"] = int(model.onebody_magmombasis_coeffs.shape[1])
     return config
 
 
@@ -691,6 +719,7 @@ def get_loss_fn(
             energy_weight=args.energy_weight,
             forces_weight=args.forces_weight,
             stress_weight=args.stress_weight,
+            magforces_weight=args.magforces_weight,
             huber_delta=args.huber_delta,
         )
     elif args.loss == "l1l2energyforces":
@@ -716,6 +745,10 @@ def get_loss_fn(
             energy_weight=args.energy_weight,
             forces_weight=args.forces_weight,
             dipole_weight=args.dipole_weight,
+        )
+    elif args.loss == "EvenSpline1BodyLoss":
+        loss_fn = modules.EvenSpline1BodyLoss(
+            lambda_smooth = 3e-1,
         )
     else:
         loss_fn = modules.WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
@@ -876,11 +909,35 @@ def get_params_options(
                 "weight_decay": 0.0,
                 "lr": lr_params_factors.get("readouts_lr_factor", 1.0) * args.lr,
             },
-        ],
-        lr=args.lr,
-        amsgrad=args.amsgrad,
-        betas=(args.beta, 0.999),
+        ]
     )
+
+    if model.__class__.__name__ == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE" \
+        and args.train_one_body_contribution:
+            param_options["params"].append({
+                "name": "magmom_exp_scaling_and_onebody_basis",
+                "params": [model.one_body_magmom_exp_scaling] + 
+                          list(model.onebody_magmombasis_list.parameters()),
+                "weight_decay": 0.0,
+            })
+
+    if model.__class__.__name__ == "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE" \
+        and args.train_one_body_contribution:
+            param_options["params"].append({
+                "name": "magmom_exp_scaling_and_onebody_basis",
+                "params": [model.one_body_magmom_exp_scaling] + 
+                          list(model.onebody_magmombasis_list.parameters()),
+                "weight_decay": 0.0,
+            })
+
+    if "EvenSpline" in model.__class__.__name__ and args.train_one_body_contribution:
+            param_options["params"].append({
+                "name": "E_m_spline.y",
+                "params": list(model.E_m_spline.y),
+                "weight_decay": 0.0,
+            })
+            
+            
     if hasattr(model, "joint_embedding") and model.joint_embedding is not None:
         param_options["params"].append(
             {

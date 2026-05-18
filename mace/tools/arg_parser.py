@@ -144,6 +144,22 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "AtomicDipolesMACE",
             "AtomicDielectricMACE",
             "EnergyDipolesMACE",
+            "MagneticScaleShiftMACE",
+            "MagneticSolidHarmonicsScaleShiftMACE",
+            "MagneticSolidHarmonicsSeparateReadoutScaleShiftMACE",
+            "MagneticSolidHarmonicsSeparateReadoutMixMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE",
+            "MagneticSolidHarmonicsFlexibleSOScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodySelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyReadoutSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsFixingNonSpinOrbitCoupledWithOneBodyMultiSpeciesGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesFixingGinzburgSelfMagmomScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomFixingScaleShiftMACE",
+            "MagneticSolidHarmonicsSpinOrbitCoupledWithOneBodyMultiSpeciesEvenSplineSelfMagmomScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -210,6 +226,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
             "RealAgnosticResidualNonLinearInteractionBlock",
+            "MagneticRealAgnosticDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -223,6 +253,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
             "RealAgnosticResidualNonLinearInteractionBlock",
+            "MagneticRealAgnosticDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialCoupledPosToMagDensityInteractionBlock",
+            "MagneticRealAgnosticSeparateRadialDensityTestingInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticFlexibleSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledMagmomDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledMagmomDensityInteractionBlock",
+            "MagneticRealAgnosticNonSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityWithMagmomInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityWithMagmomInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -408,6 +452,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compute_avg_num_neighbors",
         help="normalization factor for the message",
+        type=str2bool,
+        default=True,
+    )
+    parser.add_argument(
+        "--compute_magforces",
+        help="Select True to compute mag forcess",
         type=str2bool,
         default=True,
     )
@@ -706,6 +756,26 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=DefaultKeys.CHARGES.value,
     )
     parser.add_argument(
+        "--magmom_key",
+        help="Key of magnetic moment in training xyz",
+        type=str,
+        default="REF_magmom",
+    )
+    parser.add_argument(
+        "--magforces_key",
+        help="Key of magnetic forces in training xyz",
+        type=str,
+        default="REF_magforces",
+    )
+
+    # Pretraining-specific keys
+    parser.add_argument(
+        "--pt_energy_key",
+        help="Key of reference energies in pretraining data (defaults to energy_key if not specified)",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
         "--elec_temp_key",
         help="Key of electronic temperature in training xyz",
         type=str,
@@ -747,6 +817,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=None,
     )
     parser.add_argument(
+        "--pt_magmom_key",
+        help="Key of magnetic moment in training xyz",
+        type=str,
+        default="REF_magmom",
+    )
+    parser.add_argument(
+        "--pt_magforces_key",
+        help="Key of magnetic forces in training xyz",
+        type=str,
+        default="REF_magforces",
+    )
+
+
+    parser.add_argument(
         "--skip_evaluate_heads",
         help="Comma-separated list of heads to skip during final evaluation",
         type=str,
@@ -770,6 +854,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "universal",
             "energy_forces_dipole",
             "l1l2energyforces",
+            "EvenSpline1BodyLoss",
         ],
     )
     parser.add_argument(
@@ -782,6 +867,17 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=100.0,
         dest="swa_forces_weight",
+    )
+    parser.add_argument(
+        "--magforces_weight", help="weight of mag forces loss", type=float, default=100.0
+    )
+    parser.add_argument(
+        "--swa_magforces_weight",
+        "--stage_two_magforces_weight",
+        help="weight of magforces loss after starting Stage Two (previously called swa)",
+        type=float,
+        default=100.0,
+        dest="swa_magforces_weight",
     )
     parser.add_argument(
         "--energy_weight", help="weight of energy loss", type=float, default=1.0
@@ -1049,6 +1145,15 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str2bool,
         default=False,
     )
+
+    # optional for data augmentation
+    parser.add_argument(
+        "--data_aug_magmom",
+        help="Whether to use data agumentation on manetic moment training",
+        type=str2bool,
+        default=False,
+    )
+
     # options for using Weights and Biases for experiment tracking
     # to install see https://wandb.ai
     parser.add_argument(
@@ -1099,6 +1204,69 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "forces_weight",
         ],
     )
+
+    # --- magnetic mace ---
+    parser.add_argument(
+        "--num_mag_radial_basis_one_body",
+        help="number of radial basis for one body contribution in magnetic mace",
+        type=int,
+        default=10,
+#        nargs='+',
+    )
+    parser.add_argument(
+        "--m_max",
+        help="|m| basis m_max for magnetic momgent",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--m_max_1b",
+        help="|m| basis m_max for one body magnetic momgent",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--prefactor",
+        help="|m| basis m_max for one body magnetic momgent",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--lambda_smooth",
+        help="regularization constant used",
+        type=float,
+        nargs='+',
+    )
+    parser.add_argument(
+        "--max_m_ell",
+        help="max_ell for magnetic mace",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--num_mag_radial_basis",
+        help="number of radial basis for magnetic part",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--contraction_cls_first",
+        help="Type of first contraction block used",
+        type=str,
+        default="SymmetricContraction",
+    )
+    parser.add_argument(
+        "--contraction_cls",
+        help="Type of contraction blocks used except first layer",
+        type=str,
+        default="SymmetricContraction",
+    )
+    parser.add_argument(
+        "--train_one_body_contribution",
+        type=str2bool,
+        default=False
+    )
+
     return parser
 
 
@@ -1276,6 +1444,7 @@ def build_preprocess_arg_parser() -> argparse.ArgumentParser:
         default=None,
         required=False,
     )
+
     return parser
 
 

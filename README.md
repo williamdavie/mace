@@ -1,3 +1,21 @@
+### <!!> All magnetic functionality developed by the authors of the following: 
+
+Paper:
+```bibtex
+@article{ho2026equivariant,
+  title={Equivariant Many-body Message Passing Interatomic Potentials for Magnetic Materials},
+  author={Ho, Cheuk Hin and van der Oord, Cas and Darby, James P and Keane, Theo and Benson, Raz L and Espinoza, Cristian Rebolledo and Kulkarni, Rutvij and Spinu, Elina and Papanikolaou, Michail and Tomsett, Richard and others},
+  journal={arXiv preprint arXiv:2604.08143},
+  year={2026}
+}
+```
+
+and availible at: 
+https://github.com/CheukHinHoJerry/mace
+
+
+
+
 # <span style="font-size:larger;">MACE</span>
 
 [![GitHub release](https://img.shields.io/github/release/ACEsuit/mace.svg)](https://GitHub.com/ACEsuit/mace/releases/)

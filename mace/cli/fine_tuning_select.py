@@ -17,8 +17,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from mace.calculators import MACECalculator, mace_mp
 from mace.calculators.foundations_models import mace_mp_names
+from mace.calculators import MACECalculator, MagneticMACECalculator, mace_mp
+from mace.modules import MagneticSCFMACE
 
 try:
     import fpsample  # type: ignore
@@ -178,6 +179,18 @@ def build_default_finetuning_select_arg_parser() -> argparse.ArgumentParser:
         help="do not allow random padding of the configurations to match the number of samples",
         action="store_false",
         dest="allow_random_padding",
+        )
+    parser.add_argument(
+        "--magmom_key_pt",
+        help="mangetic moment key, needed for magnetic MACE to rewrite magmom as dft_magmom to be used by calc",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--magmom_key_ft",
+        help="mangetic moment key, needed for magnetic MACE to rewrite magmom as dft_magmom to be used by calc",
+        type=str,
+        default=None,
     )
     parser.add_argument("--seed", help="random seed", type=int, default=42)
     return parser
@@ -194,6 +207,11 @@ def calculate_descriptors(atoms: List[ase.Atoms], calc: MACECalculator) -> None:
         }
         mol.info["mace_descriptors"] = descriptors_dict
 
+def init_magnetic_mace_wrapper(PATH, device="cpu", default_dtype="float64"):
+    model = torch.load(PATH, map_location = device, weights_only = False).to(device)
+    magmom_maceeq = MagneticSCFMACE(model, use_scf=False)
+    calc = MagneticMACECalculator(models = [magmom_maceeq,], device = device, default_dtype=default_dtype)
+    return calc
 
 def filter_atoms(
     atoms: ase.Atoms,
@@ -289,6 +307,17 @@ class FPS:
                     descriptors[z]
                 ).astype(np.float32)
 
+def set_magmom(ats, magmom_key = None):
+    N_configs = len(ats)
+    have_magmom = 0
+    if magmom_key == None:
+        return ats
+    else:
+        for at in ats:
+            at.arrays['dft_magmom'] = at.arrays[magmom_key]
+            have_magmom += 1
+    print(f"Found magnetic moment in {have_magmom} number of configs in {N_configs}.")
+    return ats
 
 def _load_calc(
     model: str, device: str, default_dtype: str, head: str, subselect: SubselectType
@@ -298,12 +327,22 @@ def _load_calc(
     if model in filter(None, mace_mp_names):
         calc = mace_mp(model, device=device, head=head, default_dtype=default_dtype)
     else:
-        calc = MACECalculator(
-            model_paths=model,
-            device=device,
-            head=head,
-            default_dtype=default_dtype,
-        )
+        
+        if magmom_key_ft != None and magmom_key_pt != None:
+            calc = init_magnetic_mace_wrapper(model, device = device, default_dtype=default_dtype)
+            
+        else:
+            calc = MACECalculator(
+                model_paths=model,
+                device=device,
+                head=head,
+                default_dtype=default_dtype,
+            )
+            
+    if isinstance(configs_ft, str):
+        atoms_list_ft = ase.io.read(configs_ft, index=":")
+        atoms_list_ft = set_magmom(atoms_list_ft, magmom_key_ft)
+        
     return calc
 
 
@@ -333,11 +372,12 @@ def _read_finetuning_configs(
         assert all(isinstance(x, str) for x in configs_ft)
         atoms_list_ft = []
         for path in configs_ft:
-            atoms_list_ft += ase.io.read(path, index=":")
+            atoms_list_ft += set_magmom(ase.io.read(path, index=":"), magmom_key_ft)
         return atoms_list_ft
     if configs_ft is None:
         return []
     raise ValueError(f"Invalid type for configs_ft: {type(configs_ft)}")
+
 
 
 def _filter_pretraining_data(
@@ -394,6 +434,14 @@ def _load_descriptors(
         if calc is None:
             raise ValueError("MACECalculator must be provided to calculate descriptors")
         calculate_descriptors(atoms, calc)
+        atoms_list_pt = set_magmom(ase.io.read(configs_pt, index=":"), magmom_key=magmom_key_pt)
+        if descriptors is not None:
+            logging.info(
+                f"Loading descriptors for the pretraining set from {descriptors}"
+            )
+            descriptors = np.load(descriptors, allow_pickle=True)
+            for i, atoms in enumerate(atoms_list_pt):
+                atoms.info["mace_descriptors"] = descriptors[i]
 
 
 def _maybe_save_descriptors(

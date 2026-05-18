@@ -17,7 +17,7 @@ from mace import data
 from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
 from mace.modules.utils import extract_invariant
 from mace.tools import torch_geometric, torch_tools, utils
-
+from tqdm import tqdm
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--compute_bec",
         help="compute BEC",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--return_magforces",
         action="store_true",
         default=False,
     )
@@ -108,6 +113,13 @@ def parse_args() -> argparse.Namespace:
         required=False,
         default=None,
     )
+    parser.add_argument(
+        "--magmom_key",
+        help="key for getting magnetic moment",
+        type=str,
+        required=True,
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -158,7 +170,7 @@ def run(args: argparse.Namespace) -> None:
     else:
         head_name = "Default"
     configs = [
-        data.config_from_atoms(atoms, head_name=head_name) for atoms in atoms_list
+        data.config_from_atoms(atoms, head_name=head_name, magmom_key = args.magmom_key) for atoms in atoms_list
     ]
 
     z_table = utils.AtomicNumberTable([int(z) for z in model.atomic_numbers])
@@ -189,8 +201,9 @@ def run(args: argparse.Namespace) -> None:
     bec_list = []
     qs_list = []
     forces_collection = []
+    magforces_collection = []
 
-    for batch in data_loader:
+    for batch in tqdm(data_loader):
         batch = batch.to(device)
         output = get_model_output(
             model, batch.to_dict(), args.compute_stress, args.compute_bec
@@ -260,17 +273,28 @@ def run(args: argparse.Namespace) -> None:
                     :-1
                 ]  # drop last as its empty
             )
+        if args.return_magforces:
+            magforces = np.split(
+                torch_tools.to_numpy(output["magforces"]),
+                indices_or_sections=batch.ptr[1:],
+                axis=0,
+            )
+            magforces_collection.append(magforces[:-1])
 
         forces = np.split(
             torch_tools.to_numpy(output["forces"]),
             indices_or_sections=batch.ptr[1:],
             axis=0,
         )
+
         forces_collection.append(forces[:-1])  # drop last as its empty
 
     energies = np.concatenate(energies_list, axis=0)
     forces_list = [
         forces for forces_list in forces_collection for forces in forces_list
+    ]
+    magforces_list = [
+        magforces for magforces_list in magforces_collection for magforces in magforces_list
     ]
     assert len(atoms_list) == len(energies) == len(forces_list)
     if args.compute_stress:
@@ -306,6 +330,9 @@ def run(args: argparse.Namespace) -> None:
             atoms.arrays[args.info_prefix + "BEC"] = bec_list[i].reshape(-1, 9)
             atoms.arrays[args.info_prefix + "latent_charges"] = qs_list[i]
 
+        if args.return_magforces:
+            atoms.arrays[args.info_prefix + "magforces"] = magforces_list[i]
+            
         if args.return_contributions:
             atoms.info[args.info_prefix + "BO_contributions"] = contributions[i]
 
@@ -331,6 +358,7 @@ def run(args: argparse.Namespace) -> None:
 
     # Write atoms to output path
     ase.io.write(args.output, images=atoms_list, format="extxyz")
+    print("result saved at : ", args.output)
 
 
 if __name__ == "__main__":
