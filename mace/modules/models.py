@@ -679,6 +679,8 @@ class MagneticMACE(torch.nn.Module):
         radial_type: Optional[str] = "bessel",
         heads: Optional[List[str]] = None,
         cueq_config: Optional[Dict[str, Any]] = None, 
+        embedding_specs: Optional[Dict[str, Any]] = None,
+        use_embedding_readout: bool = False,
         apply_cutoff: bool = True,  # pylint: disable=unused-argument
         use_reduced_cg: bool = True,  # pylint: disable=unused-argument
         use_so3: bool = False,  # pylint: disable=unused-argument
@@ -715,6 +717,24 @@ class MagneticMACE(torch.nn.Module):
             irreps_out=node_feats_irreps,
             cueq_config=cueq_config,
         )
+        embedding_size = node_feats_irreps.count(o3.Irrep(0, 1))
+        
+        print("EMBEDDING UPDATE")
+        if embedding_specs is not None:
+            self.embedding_specs = embedding_specs
+            self.joint_embedding = GenericJointEmbedding(
+                base_dim=embedding_size,
+                embedding_specs=embedding_specs,
+                out_dim=embedding_size,
+            )
+            if use_embedding_readout:
+                self.embedding_readout = LinearReadoutBlock(
+                    node_feats_irreps,
+                    o3.Irreps(f"{len(heads)}x0e"),
+                    cueq_config,
+                    oeq_config,
+                )
+
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
             num_bessel=num_bessel,
@@ -1196,6 +1216,26 @@ class MagneticScaleShiftMACE(MagneticMACE):
             src=node_inter_es, index=data["batch"], dim=-1, dim_size=num_graphs
         )  # [n_graphs,]
         
+        if hasattr(self, "joint_embedding"):
+            embedding_features: Dict[str, torch.Tensor] = {}
+            for name, _ in self.embedding_specs.items():
+                embedding_features[name] = data[name]
+            node_feats += self.joint_embedding(
+                data["batch"],
+                embedding_features,
+            )
+            if hasattr(self, "embedding_readout"):
+                embedding_node_energy = self.embedding_readout(
+                    node_feats, node_heads
+                ).squeeze(-1)
+                embedding_energy = scatter_sum(
+                    src=embedding_node_energy,
+                    index=data["batch"],
+                    dim=0,
+                    dim_size=num_graphs,
+                )
+                e0 += embedding_energy
+        
         # Add E_0 and (scaled) interaction energy
         total_energy = e0 + inter_e
         node_energy = node_e0 + node_inter_es
@@ -1235,6 +1275,8 @@ class SHModule(torch.nn.Module):
 
     def __init__(self, l_max):
         super().__init__()
+        
+        
         self.SH = sphericart.torch.SolidHarmonics(l_max)
         # normalization that is consistent with e3nn spherical harmonics "component"
         #self.register_buffer('scaling', torch.tensor(np.sqrt(4 * np.pi)))
@@ -1607,6 +1649,9 @@ class MagneticSolidHarmonicsSpinOrbitCoupledScaleShiftMACE(MagneticMACE):
             "node_feats": node_feats_out,
         }
         return output
+    
+    
+# Model in use
 
 @compile_mode("script")
 class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(MagneticMACE):
@@ -1743,6 +1788,29 @@ class MagneticSolidHarmonicsSpinOrbitCoupledWithSelfMagmomScaleShiftMACE(Magneti
         #
         magmom_node_feats = self.mag_radial_embedding(magmom_lenghts_trans) # (n_atoms, n_basis)
         
+        # Embeddings of additional features
+        if hasattr(self, "joint_embedding"):
+            embedding_features: Dict[str, torch.Tensor] = {}
+            for name, _ in self.embedding_specs.items():
+                embedding_features[name] = data[name]
+            node_feats += self.joint_embedding(
+                data["batch"],
+                embedding_features,
+            )
+            if hasattr(self, "embedding_readout"):
+                embedding_node_energy = torch.atleast_1d(
+                    self.embedding_readout(node_feats, node_heads)[
+                        num_atoms_arange, node_heads
+                    ].squeeze(-1)
+                )
+                embedding_energy = scatter_sum(
+                    src=embedding_node_energy,
+                    index=data["batch"],
+                    dim=0,
+                    dim_size=num_graphs,
+                )
+                e0 += embedding_energy
+    
         # Interactions
         node_es_list = [pair_node_energy]
         node_feats_list = []
